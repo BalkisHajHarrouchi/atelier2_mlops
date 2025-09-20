@@ -1,0 +1,23 @@
+# Prepare data: build target (if needed), infer feature types, create preprocessor, and make a train/test split
+python main.py prepare --csv gaming_100mb.csv
+
+# Train the model: ALWAYS undersamples the training split to 50/50, fits pipeline (prep -> [KBest] -> model), saves model
+python main.py train --csv gaming_100mb.csv --out churn_model.joblib
+
+
+# Predict on new unlabeled data: drops leakage/ID cols automatically, writes class labels (0/1) to preds.csv
+python main.py predict --csv new_games_predict.csv --model churn_model.joblib --out preds.csv
+# Quick peek at the predictions file (first 20 lines)
+head -n 20 preds.csv
+
+# Predict with a stricter decision threshold (e.g., require prob >= 0.7 for class=1) and save probabilities to probs.csv
+python main.py predict --csv new_games_predict.csv --model churn_model.joblib --out preds.csv --threshold 0.7 --proba-out probs.csv
+# Quick peek at the probabilities file (first 20 lines)
+head -n 20 probs.csv
+
+
+# Evaluate the saved model on a fresh prepare split (test set remains imbalanced to reflect reality)
+python main.py evaluate --csv gaming_100mb.csv --model churn_model.joblib
+
+# Cross-validate (5 folds): uses enforced undersampling inside each fold for fairer training; reports mean ± std metrics
+python main.py cv --csv gaming_100mb.csv --folds 5
