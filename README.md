@@ -1,7 +1,6 @@
 # Atelier 2 — Modular Churn Pipeline (Short README)
 
-Predict if a gamer **continues (1)** or **churns (0)**.  
-Target built as: `churn = 1 if playtime_2weeks > 0 else 0`.
+This homework builds a modular ML pipeline to predict **near-term player activity (churn)** using a Steam-like games dataset (`gaming_100mb.csv`) that contains per-title attributes (genre, platform, price, ratings, tags) and engagement aggregates (playtime_forever, playtime_2weeks, reviews, players, recommendations, etc.). The target is defined as: `churn = 1 if playtime_2weeks > 0 else 0`.
 
 ## Files
 - **main.py** — CLI with subcommands: `prepare`, `train`, `predict`, `evaluate`, `cv`.
