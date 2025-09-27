@@ -1,23 +1,24 @@
-# main.py
+"""CLI entrypoint driving the ML pipeline with step flags."""
+
+from __future__ import annotations
+
 import argparse
 import json
 import pandas as pd
 
 from model_pipeline import (
+    PrepOptions,
     prepare_data,
     train_model,
     evaluate_model,
     save_model,
     load_model,
-    get_selected_features,
-    prepare_for_cv,
 )
 
-from sklearn.model_selection import StratifiedKFold, GroupKFold, cross_validate
 
-def cmd_prepare(args):
-    bundle = prepare_data(
-        csv_path=args.csv,
+def _opts_from_args(args: argparse.Namespace) -> PrepOptions:
+    """Build a PrepOptions object from CLI args."""
+    return PrepOptions(
         target=args.target,
         test_size=args.test_size,
         random_state=args.seed,
@@ -28,71 +29,88 @@ def cmd_prepare(args):
         group_col=args.group_col,
         time_col=args.time_col,
         time_cutoff=args.time_cutoff,
+        balance_test=True,
+        n_per_class=2100,
     )
-    print(f"Train rows: {bundle.X_train.shape[0]} | Test rows: {bundle.X_test.shape[0]}")
-    print(f"Features — numeric: {len(bundle.numeric)}, categorical: {len(bundle.categorical)}, boolean: {len(bundle.boolean)}")
-    print("Numeric:", bundle.numeric[:15], "..." if len(bundle.numeric) > 15 else "")
-    print("Categorical:", bundle.categorical[:15], "..." if len(bundle.categorical) > 15 else "")
-    print("Boolean:", bundle.boolean[:15], "..." if len(bundle.boolean) > 15 else "")
 
-def cmd_train(args):
-    bundle = prepare_data(
-        csv_path=args.csv,
-        target=args.target,
-        test_size=args.test_size,
-        random_state=args.seed,
-        drop_cols=args.drop_cols,
-        build_churn_from_playtime_2w=not args.no_build_churn,
-        drop_proxies=args.drop_proxies,
-        split_strategy=args.split_strategy,
-        group_col=args.group_col,
-        time_col=args.time_col,
-        time_cutoff=args.time_cutoff,
-    )
-    model = train_model(
-        bundle,
-        kbest_k=args.kbest,
-        kbest_score=args.kbest_score,
-        random_state=args.seed,
-    )
-    save_model(model, args.out)
-    print(f"Model saved to {args.out}")
 
-    metrics = evaluate_model(model, bundle.X_test, bundle.y_test)
+def _maybe_prepare(args: argparse.Namespace):
+    """Optionally run preparation and print a short summary."""
+    opts = _opts_from_args(args)
+    bundle = prepare_data(args.data, opts)
+    print(f"Train rows: {bundle.x_train.shape[0]} | Test rows: {bundle.x_test.shape[0]}")
+    print(
+        "Features — "
+        f"numeric: {len(bundle.columns.numeric)}, "
+        f"categorical: {len(bundle.columns.categorical)}, "
+        f"boolean: {len(bundle.columns.boolean)}"
+    )
+    print(
+        "Numeric:", bundle.columns.numeric[:15], "..." if len(bundle.columns.numeric) > 15 else ""
+    )
+    print(
+        "Categorical:",
+        bundle.columns.categorical[:15],
+        "..." if len(bundle.columns.categorical) > 15 else "",
+    )
+    print(
+        "Boolean:", bundle.columns.boolean[:15], "..." if len(bundle.columns.boolean) > 15 else ""
+    )
+    return bundle
+
+
+def _maybe_train(args: argparse.Namespace, bundle):
+    """Train a model using an existing or freshly prepared bundle."""
+    if bundle is None:
+        bundle = _maybe_prepare(args)
+    model = train_model(bundle, random_state=args.seed)
+    print(" Modèle entraîné")
+    return model, bundle
+
+
+def _maybe_evaluate(args: argparse.Namespace, model, bundle):
+    """Evaluate a model; if needed, (re)create the test split to match options."""
+    if model is None:
+        model = load_model(args.model)
+    if bundle is None:
+        bundle = _maybe_prepare(args)
+    metrics = evaluate_model(model, bundle.x_test, bundle.y_test)
     print(json.dumps({k: v for k, v in metrics.items() if k != "report"}, indent=2))
     print("\nClassification report:\n", metrics["report"])
+    return model, bundle
 
-    if args.kbest and args.kbest > 0:
-        feats = get_selected_features(model, bundle)
-        print("\nTop selected features (name, score):")
-        for name, score in feats[:min(40, len(feats))]:
-            print(f"{name:30s}  {score:.5f}")
 
-def cmd_evaluate(args):
-    model = load_model(args.model)
-    bundle = prepare_data(
-        csv_path=args.csv,
-        target=args.target,
-        test_size=args.test_size,
-        random_state=args.seed,
-        drop_cols=args.drop_cols,
-        build_churn_from_playtime_2w=not args.no_build_churn,
-        drop_proxies=args.drop_proxies,
-        split_strategy=args.split_strategy,
-        group_col=args.group_col,
-        time_col=args.time_col,
-        time_cutoff=args.time_cutoff,
-    )
-    metrics = evaluate_model(model, bundle.X_test, bundle.y_test)
-    print(json.dumps({k: v for k, v in metrics.items() if k != "report"}, indent=2))
-    print("\nClassification report:\n", metrics["report"])
+def _maybe_save(args: argparse.Namespace, model):
+    """Save a model if present."""
+    if model is None:
+        print(" Aucun modèle à sauvegarder. Lance d'abord --train_model")
+        return None
+    path = save_model(model, args.model)
+    print(" Modèle sauvegardé :", path)
+    return path
 
-def cmd_predict(args):
-    model = load_model(args.model)
-    df = pd.read_csv(args.csv)
 
-    # Drop leakage/ID columns if present (mirror prepare_data)
-    for col in [args.target, "playtime_2weeks", "median_playtime_2weeks", "game_id", "name", "release_date"]:
+def _maybe_load(args: argparse.Namespace):
+    """Just load the model to verify it exists/works."""
+    loaded = load_model(args.model)
+    print(" Modèle rechargé :", type(loaded))
+    return loaded
+
+
+def _maybe_predict(args: argparse.Namespace, model):
+    """Predict on a new CSV, mirroring leakage drops used in preparation."""
+    if model is None:
+        model = load_model(args.model)
+    df = pd.read_csv(args.predict_csv)
+
+    for col in [
+        args.target,
+        "playtime_2weeks",
+        "median_playtime_2weeks",
+        "game_id",
+        "name",
+        "release_date",
+    ]:
         if col in df.columns:
             df = df.drop(columns=[col])
 
@@ -108,128 +126,70 @@ def cmd_predict(args):
     pd.DataFrame({"prediction": preds}).to_csv(out, index=False)
     print(f"Predictions saved to {out}")
 
-def cmd_cv(args):
-    # Prepare full dataset (no split here)
-    X, y, pre = prepare_for_cv(
-        csv_path=args.csv,
-        target=args.target,
-        drop_cols=args.drop_cols,
-        build_churn_from_playtime_2w=not args.no_build_churn,
-        drop_proxies=args.drop_proxies,
-    )
 
-    # Build an imblearn pipeline so undersampling happens inside each fold
-    try:
-        from imblearn.pipeline import Pipeline as ImbPipeline
-        from imblearn.under_sampling import RandomUnderSampler
-    except Exception as e:
-        raise ImportError(
-            "imbalanced-learn is required for CV with enforced undersampling. "
-            "Install with: pip install imbalanced-learn"
-        ) from e
+def run(parsed_args: argparse.Namespace) -> None:
+    """Drive the pipeline based on provided flags."""
+    bundle = None
+    model = None
 
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.feature_selection import SelectKBest, mutual_info_classif, f_classif
+    if parsed_args.prepare_data:
+        bundle = _maybe_prepare(parsed_args)
 
-    steps = [("prep", pre)]
-    if args.kbest and args.kbest > 0:
-        k = min(int(args.kbest), X.shape[1])
-        score_func = mutual_info_classif if args.kbest_score == "mutual_info" else f_classif
-        steps.append(("select", SelectKBest(score_func=score_func, k=k)))
+    if parsed_args.train_model:
+        model, bundle = _maybe_train(parsed_args, bundle)
 
-    steps.append(("sampler", RandomUnderSampler(random_state=args.seed)))  # ALWAYS undersample in CV
-    steps.append(("model", RandomForestClassifier(
-        n_estimators=300, random_state=args.seed, n_jobs=-1, class_weight=None
-    )))
+    if parsed_args.evaluate_model:
+        model, bundle = _maybe_evaluate(parsed_args, model, bundle)
 
-    pipe = ImbPipeline(steps)
+    if parsed_args.save_model:
+        _maybe_save(parsed_args, model)
 
-    if args.group_col and args.group_col in X.columns:
-        groups = X[args.group_col].values
-        cv = GroupKFold(n_splits=args.folds)
-        splits = cv.split(X, y, groups=groups)
-    else:
-        cv = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
-        splits = cv.split(X, y)
+    if parsed_args.load_model:
+        _maybe_load(parsed_args)
 
-    scoring = ["accuracy", "f1_macro", "f1_weighted"]
-    res = cross_validate(pipe, X, y, cv=list(splits), scoring=scoring, n_jobs=-1, return_train_score=True)
+    if parsed_args.predict:
+        _maybe_predict(parsed_args, model)
 
-    import numpy as np
-    def mean_std(key):
-        return float(np.mean(res[key])), float(np.std(res[key]))
-
-    acc_m, acc_s = mean_std("test_accuracy")
-    f1m_m, f1m_s = mean_std("test_f1_macro")
-    f1w_m, f1w_s = mean_std("test_f1_weighted")
-
-    print(json.dumps({
-        "cv_folds": args.folds,
-        "accuracy_mean": acc_m, "accuracy_std": acc_s,
-        "f1_macro_mean": f1m_m, "f1_macro_std": f1m_s,
-        "f1_weighted_mean": f1w_m, "f1_weighted_std": f1w_s
-    }, indent=2))
-
-def build_parser():
-    p = argparse.ArgumentParser(description="Churn classification pipeline (preprocessing done in preparation).")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    def common_io(sp):
-        sp.add_argument("--csv", required=True, help="Path to CSV data file")
-        sp.add_argument("--target", default="churn", help="Target column name (default: churn)")
-        sp.add_argument("--test-size", type=float, default=0.2)
-        sp.add_argument("--seed", type=int, default=42)
-        sp.add_argument("--drop-cols", nargs="*", default=[], help="Extra columns to drop from features")
-        sp.add_argument("--no-build-churn", action="store_true", help="Do NOT auto-build 'churn' from playtime_2weeks")
-
-        # Overfitting controls / data hygiene
-        sp.add_argument("--drop-proxies", action="store_true",
-                        help="Drop near-label proxy features (playtime_forever, reviews, players, ...)")
-        sp.add_argument("--split-strategy", choices=["random", "group", "time"], default="random",
-                        help="random (default), group by a column, or time-based split")
-        sp.add_argument("--group-col", default=None, help="Column for group split (e.g., developer)")
-        sp.add_argument("--time-col", default=None, help="Time column for time split (e.g., year)")
-        sp.add_argument("--time-cutoff", type=float, default=None,
-                        help="Train where time_col < cutoff; test where >= cutoff (with --split-strategy time)")
-
-        # Feature selection
-        sp.add_argument("--kbest", type=int, default=0, help="SelectKBest top-K features (0=off)")
-        sp.add_argument("--kbest-score", choices=["mutual_info", "f_classif"], default="mutual_info",
-                        help="Scoring for KBest (default: mutual_info)")
-
-        # NOTE: balancing is no longer optional; we always undersample during training & CV.
-
-    sp = sub.add_parser("prepare", help="Prepare: split, infer columns, and BUILD PREPROCESSOR")
-    common_io(sp)
-    sp.set_defaults(func=cmd_prepare)
-
-    sp = sub.add_parser("train", help="Train and save model (uses preprocessor from preparation)")
-    common_io(sp)
-    sp.add_argument("--out", default="churn_model.joblib", help="Output model path")
-    sp.set_defaults(func=cmd_train)
-
-    sp = sub.add_parser("evaluate", help="Load model and evaluate on freshly prepared split")
-    common_io(sp)
-    sp.add_argument("--model", required=True, help="Path to saved model")
-    sp.set_defaults(func=cmd_evaluate)
-
-    sp = sub.add_parser("predict", help="Predict labels for a new CSV (no target needed)")
-    sp.add_argument("--csv", required=True, help="Path to CSV without target")
-    sp.add_argument("--model", required=True, help="Path to saved model")
-    sp.add_argument("--out", default="predictions.csv", help="Where to save predictions CSV")
-    sp.add_argument("--target", default="churn")
-    sp.add_argument("--threshold", type=float, default=0.5, help="Probability threshold for class=1 (if model supports)")
-    sp.add_argument("--proba-out", default="", help="Optional CSV path to save predicted probabilities")
-    sp.set_defaults(func=cmd_predict)
-
-    sp = sub.add_parser("cv", help="Cross-validate with K folds (stratified or grouped)")
-    common_io(sp)                  # includes --group-col
-    sp.add_argument("--folds", type=int, default=5)
-    sp.set_defaults(func=cmd_cv)
-
-    return p
 
 if __name__ == "__main__":
-    parser = build_parser()
-    args = parser.parse_args()
-    args.func(args)
+    parser = argparse.ArgumentParser(description="Simple flag-driven ML pipeline")
+
+    # IO (defaults aligned with your repo)
+    parser.add_argument("--data", default="gaming_100mb.csv", help="Path to CSV")
+    parser.add_argument(
+        "--model", default="models/churn_model.joblib", help="Model path for save/load"
+    )
+
+    # Stage flags
+    parser.add_argument("--prepare_data", action="store_true", help="Préparer les données")
+    parser.add_argument("--train_model", action="store_true", help="Entraîner le modèle")
+    parser.add_argument("--evaluate_model", action="store_true", help="Évaluer le modèle")
+    parser.add_argument("--save_model", action="store_true", help="Sauvegarder le modèle")
+    parser.add_argument("--load_model", action="store_true", help="Recharger le modèle")
+
+    # Predict
+    parser.add_argument("--predict", action="store_true", help="Prédire sur un nouveau CSV")
+    parser.add_argument("--predict_csv", default="", help="CSV path for prediction")
+    parser.add_argument("--out", default="predictions.csv", help="Where to save predictions")
+    parser.add_argument(
+        "--threshold", type=float, default=0.5, help="Threshold for class=1 if model supports proba"
+    )
+    parser.add_argument("--proba_out", default="", help="Optional CSV to save probabilities")
+
+    # Preparation/options
+    parser.add_argument("--target", default="churn", help="Target column")
+    parser.add_argument("--test_size", type=float, default=0.2)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--drop_cols", nargs="*", default=[], help="Extra columns to drop")
+    parser.add_argument(
+        "--no_build_churn", action="store_true", help="Do NOT build 'churn' from playtime_2weeks"
+    )
+    parser.add_argument(
+        "--drop_proxies", action="store_true", help="Drop proxy features (reviews, players, ...)"
+    )
+    parser.add_argument("--split_strategy", choices=["random", "group", "time"], default="random")
+    parser.add_argument("--group_col", default=None)
+    parser.add_argument("--time_col", default=None)
+    parser.add_argument("--time_cutoff", type=float, default=None)
+
+    run(parser.parse_args())

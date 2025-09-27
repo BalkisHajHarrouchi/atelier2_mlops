@@ -1,0 +1,20 @@
+# Installation + environment
+make install
+
+# Run pipeline
+make pipeline
+
+# Or manually (no Makefile)
+python main.py --prepare_data --train_model --evaluate_model --save_model
+
+# Lint + static checks bundle
+make lint          # runs flake8 + pylint + mypy + bandit
+
+# Or run each tool individually
+make flake8
+make pylint
+make mypy
+make bandit
+
+# Run tests (non-blocking if there's no tests/ folder; it will just "skip")
+make test

@@ -1,0 +1,17 @@
+[MASTER]
+ignore = venv,.venv
+jobs = 0
+py-version = 3.10
+
+; [MESSAGES CONTROL]
+; disable =
+;     C0114,  # missing-module-docstring
+;     C0115,  # missing-class-docstring
+;     C0116,  # missing-function-docstring
+;     C0103,  # invalid-name (X_train, X_test)
+;     C0415,  # import-outside-toplevel (lazy import in undersampling)
+;     R0912,  # too-many-branches
+;     R0913,  # too-many-arguments
+;     R0914,  # too-many-locals
+;     R0917,   # too-many-positional-arguments
+;     R0902
