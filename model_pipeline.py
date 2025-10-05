@@ -1,4 +1,5 @@
-"""Model pipeline: prepare, train, evaluate, save, load.
+# model_pipeline.py
+"""Model pipeline: prepare, train, evaluate, save, load, and predict.
 
 - Forces exact undersampling to `n_per_class` per label (default 2100) for train,
   and optionally for test.
@@ -8,8 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
-import os
 
+import os
 import numpy as np
 import joblib
 import pandas as pd
@@ -342,3 +343,126 @@ def save_model(model: Pipeline, path: str) -> str:
 def load_model(path: str) -> Pipeline:
     """Load a previously saved pipeline."""
     return joblib.load(path)
+
+
+# ===== Prediction helpers =====
+
+LEAK_COLS = {
+    "game_id",
+    "name",
+    "release_date",
+    "playtime_2weeks",
+    "median_playtime_2weeks",
+}
+
+
+def drop_leakage_columns(
+    df: pd.DataFrame, target: str, extra_drop: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """Drop target and known leakage columns if present."""
+    cols_to_drop = set(LEAK_COLS) | {target}
+    if extra_drop:
+        cols_to_drop |= set(extra_drop)
+    return df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors="ignore")
+
+
+def expected_feature_columns_from_model(model: Pipeline) -> Optional[List[str]]:
+    """
+    Try to recover the original feature names used during training from the
+    ColumnTransformer selection.
+    """
+    prep = model.named_steps.get("prep")
+    if prep is None:
+        return None
+    transformers = getattr(prep, "transformers", None) or getattr(prep, "transformers_", None)
+    if not transformers:
+        return None
+    cols: List[str] = []
+    for _, _, sel in transformers:
+        if sel is None or sel == "drop":
+            continue
+        if isinstance(sel, (list, tuple)):
+            cols.extend(list(sel))
+        else:
+            try:
+                cols.extend(list(sel))
+            except Exception:
+                pass
+    return cols
+
+
+def align_features_for_model(df: pd.DataFrame, model: Pipeline) -> pd.DataFrame:
+    """
+    Ensure df has all columns the model expects; create missing columns with NaN and order them.
+    Extra columns are safe (remainder='drop').
+    """
+    expected = expected_feature_columns_from_model(model)
+    if not expected:
+        return df
+    missing = [c for c in expected if c not in df.columns]
+    for c in missing:
+        df[c] = np.nan
+    return df[expected]
+
+
+def predict_dataframe(
+    model: Pipeline,
+    df: pd.DataFrame,
+    target: str = "churn",
+    threshold: Optional[float] = None,
+    return_proba: bool = False,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Predict labels for a DataFrame. If threshold is provided and model supports predict_proba,
+    return thresholded labels and (optionally) the raw probabilities.
+    """
+    df = drop_leakage_columns(df, target)
+    df = align_features_for_model(df, model)
+    if threshold is not None and hasattr(model, "predict_proba"):
+        proba = model.predict_proba(df)[:, 1]
+        preds = (proba >= float(threshold)).astype(int)
+        return preds, (proba if return_proba else None)
+    preds = model.predict(df)
+    return preds, None
+
+
+def predict_from_csv(
+    model: Pipeline,
+    csv_path: str,
+    target: str = "churn",
+    threshold: Optional[float] = None,
+    return_proba: bool = False,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Load CSV, then call predict_dataframe."""
+    df = pd.read_csv(csv_path)
+    return predict_dataframe(model, df, target=target, threshold=threshold, return_proba=return_proba)
+
+
+def predict_to_csv(
+    model: Pipeline,
+    csv_path: str,
+    out_path: str = "predictions.csv",
+    proba_out_path: Optional[str] = None,
+    target: str = "churn",
+    threshold: Optional[float] = None,
+) -> Tuple[str, Optional[str]]:
+    """
+    Convenience I/O wrapper: predict from a CSV and write outputs to disk.
+    Returns (predictions_csv_path, probabilities_csv_path_or_None).
+    """
+    preds, proba = predict_from_csv(
+        model,
+        csv_path,
+        target=target,
+        threshold=threshold,
+        return_proba=bool(proba_out_path),
+    )
+
+    pd.DataFrame({"prediction": preds}).to_csv(out_path, index=False)
+
+    proba_path = None
+    if proba_out_path:
+        pd.DataFrame({"proba_active": proba}).to_csv(proba_out_path, index=False)
+        proba_path = proba_out_path
+
+    return out_path, proba_path

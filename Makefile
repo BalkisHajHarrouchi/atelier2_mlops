@@ -16,12 +16,18 @@ REQ  ?= requirements.txt
 DATA  ?= gaming_100mb.csv
 MODEL ?= models/churn_model.joblib
 
+# FastAPI
+HOST ?= 0.0.0.0
+PORT ?= 8000
+APP  ?= app:app
+
 # ensure tests can import modules from repo root
 TEST_ENV := PYTHONPATH=.
 
 # ===== Phony targets =====
 .PHONY: help all venv install lint flake8 pylint mypy bandit format test \
-        prepare_data train_model evaluate_model save_model load_model pipeline clean clean-pyc
+        prepare_data train_model evaluate_model save_model load_model pipeline \
+        predict api clean clean-pyc
 
 # ===== Help =====
 help:
@@ -41,6 +47,12 @@ help:
 	@echo "  make save_model        -> python $(MAIN) --save_model --model \$$MODEL"
 	@echo "  make load_model        -> python $(MAIN) --load_model --model \$$MODEL"
 	@echo "  make pipeline          Prepare + Train + Evaluate + Save"
+	@echo
+	@echo "Prediction:"
+	@echo "  make predict           Run prediction (pass PREDICT_CSV=... OUT=...)"
+	@echo
+	@echo "API:"
+	@echo "  make api               Run FastAPI (uvicorn) on $(HOST):$(PORT)"
 	@echo
 	@echo "Tests:"
 	@echo "  make test              Run pytest if tests/ exists (skips otherwise)"
@@ -88,7 +100,6 @@ bandit: venv
 test: format flake8 pylint mypy bandit
 	@echo "All quality checks completed."
 
-
 # ===== Pipeline steps =====
 prepare_data: venv
 	$(PYTHON) $(MAIN) --prepare_data --data $(DATA)
@@ -106,11 +117,18 @@ save_model: venv
 load_model: venv
 	$(PYTHON) $(MAIN) --load_model --model $(MODEL)
 
+predict: venv
+	$(PYTHON) $(MAIN) --predict --model $(MODEL) --predict_csv $(PREDICT_CSV) --out $(OUT)
+
 # One-shot pipeline: prepare -> train -> evaluate -> save
 pipeline: venv
 	mkdir -p $(dir $(MODEL))
 	$(PYTHON) $(MAIN) --prepare_data --train_model --evaluate_model --save_model \
 	                  --data $(DATA) --model $(MODEL)
+
+# ===== API =====
+api: venv
+	$(VENV)/bin/uvicorn $(APP) --reload --host $(HOST) --port $(PORT)
 
 # ===== Cleanup =====
 clean:
